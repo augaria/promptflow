@@ -20,11 +20,13 @@ from promptflow._utils.thread_utils import RepeatLogTimer
 from promptflow._utils.utils import generate_elapsed_time_messages
 from promptflow.contracts.flow import Node
 from promptflow.contracts.run_info import RunInfo
+from promptflow.contracts.trace import TraceType
 from promptflow.exceptions import PromptflowException
 
 from .run_tracker import RunTracker
 from .thread_local_singleton import ThreadLocalSingleton
 from .tracer import Tracer
+from .otel_tracer import OpenTelemetryTracer
 
 
 class FlowExecutionContext(ThreadLocalSingleton):
@@ -71,39 +73,51 @@ class FlowExecutionContext(ThreadLocalSingleton):
         node_run_id = run_info.run_id
 
         traces = []
-        try:
-            hit_cache = False
-            # Get result from cache. If hit cache, no need to execute f.
-            cache_info: CacheInfo = self._cache_manager.calculate_cache_info(self._flow_id, f, [], kwargs)
-            if node.enable_cache and cache_info:
-                cache_result: CacheResult = self._cache_manager.get_cache_result(cache_info)
-                if cache_result and cache_result.hit_cache:
-                    # Assign cached_flow_run_id and cached_run_id.
-                    run_info.cached_flow_run_id = cache_result.cached_flow_run_id
-                    run_info.cached_run_id = cache_result.cached_run_id
-                    result = cache_result.result
-                    hit_cache = True
 
-            if not hit_cache:
-                Tracer.start_tracing(node_run_id, node.name)
-                result = self._invoke_tool_with_timer(node, f, kwargs)
-                traces = Tracer.end_tracing(node_run_id)
+        with OpenTelemetryTracer.start_as_current_span(node.source.tool if node.source.tool else node.type.value):
+            OpenTelemetryTracer.set_attribute("framework", "promptflow")
+            OpenTelemetryTracer.set_attribute("span_type", TraceType.TOOL.value)
+            OpenTelemetryTracer.set_attribute("node_name", node.name)
+            # TODO: log package_version for package tool
 
-            self._run_tracker.end_run(node_run_id, result=result, traces=traces)
-            # Record result in cache so that future run might reuse its result.
-            if not hit_cache and node.enable_cache:
-                self._persist_cache(cache_info, run_info)
+            try:
+                hit_cache = False
+                # Get result from cache. If hit cache, no need to execute f.
+                cache_info: CacheInfo = self._cache_manager.calculate_cache_info(self._flow_id, f, [], kwargs)
+                if node.enable_cache and cache_info:
+                    cache_result: CacheResult = self._cache_manager.get_cache_result(cache_info)
+                    if cache_result and cache_result.hit_cache:
+                        # Assign cached_flow_run_id and cached_run_id.
+                        run_info.cached_flow_run_id = cache_result.cached_flow_run_id
+                        run_info.cached_run_id = cache_result.cached_run_id
+                        result = cache_result.result
+                        hit_cache = True
 
-            flow_logger.info(f"Node {node.name} completes.")
-            return result
-        except Exception as e:
-            logger.exception(f"Node {node.name} in line {self._line_number} failed. Exception: {e}.")
-            if not traces:
-                traces = Tracer.end_tracing(node_run_id)
-            self._run_tracker.end_run(node_run_id, ex=e, traces=traces)
-            raise
-        finally:
-            self._run_tracker.persist_node_run(run_info)
+                if not hit_cache:
+                    Tracer.start_tracing(node_run_id, node.name)
+                    result = self._invoke_tool_with_timer(node, f, kwargs)
+                    traces = Tracer.end_tracing(node_run_id)
+
+                self._run_tracker.end_run(node_run_id, result=result, traces=traces)
+                # Record result in cache so that future run might reuse its result.
+                if not hit_cache and node.enable_cache:
+                    self._persist_cache(cache_info, run_info)
+
+                OpenTelemetryTracer.mark_succeeded()
+                OpenTelemetryTracer.set_attribute("inputs", kwargs)
+                OpenTelemetryTracer.set_attribute("output", result)
+
+                flow_logger.info(f"Node {node.name} completes.")
+                return result
+            except Exception as e:
+                OpenTelemetryTracer.mark_failed()
+                logger.exception(f"Node {node.name} in line {self._line_number} failed. Exception: {e}.")
+                if not traces:
+                    traces = Tracer.end_tracing(node_run_id)
+                self._run_tracker.end_run(node_run_id, ex=e, traces=traces)
+                raise
+            finally:
+                self._run_tracker.persist_node_run(run_info)
 
     def _prepare_node_run(self, node: Node, f, kwargs={}):
         # Ensure this thread has a valid operation context

@@ -360,6 +360,10 @@ def _init_flow_by_template(flow_name, flow_type, overwrite=False, connection=Non
 def test_flow(args):
     from promptflow._sdk._load_functions import load_flow
 
+    # Only for demo purpose. Different types of exporters should be configured for different scenarios.
+    from promptflow._core.otel_tracer import OpenTelemetryTracer
+    OpenTelemetryTracer.add_file_span_exporter(".promptflow/otel.spans.jsonl")
+
     config = list_of_dict_to_dict(args.config)
     pf_client = PFClient(config=config)
 

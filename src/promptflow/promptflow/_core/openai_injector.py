@@ -14,6 +14,8 @@ from promptflow._core.operation_context import OperationContext
 from promptflow.contracts.trace import Trace, TraceType
 
 from .tracer import Tracer
+from .otel_tracer import OpenTelemetryTracer
+
 
 USER_AGENT_HEADER = "x-ms-useragent"
 PROMPTFLOW_PREFIX = "ms-azure-ai-promptflow-"
@@ -29,28 +31,40 @@ def inject_function(args_to_ignore=None, trace_type=TraceType.LLM):
 
         @functools.wraps(f)
         def wrapped_method(*args, **kwargs):
-            if not Tracer.active():
-                return f(*args, **kwargs)
-
-            all_kwargs = {**{k: v for k, v in zip(sig.keys(), args)}, **kwargs}
-            for key in args_to_ignore:
-                all_kwargs.pop(key, None)
             name = f.__qualname__ if not f.__module__ else f.__module__ + "." + f.__qualname__
-            trace = Trace(
-                name=name,
-                type=trace_type,
-                inputs=all_kwargs,
-                start_time=datetime.utcnow().timestamp(),
-            )
-            Tracer.push(trace)
-            try:
-                result = f(*args, **kwargs)
-            except Exception as ex:
-                Tracer.pop(error=ex)
-                raise
-            else:
-                result = Tracer.pop(result)
-            return result
+
+            with OpenTelemetryTracer.start_as_current_span(name):
+                OpenTelemetryTracer.set_attribute("span_type", trace_type.value)
+
+                if not Tracer.active():
+                    return f(*args, **kwargs)
+
+                all_kwargs = {**{k: v for k, v in zip(sig.keys(), args)}, **kwargs}
+                for key in args_to_ignore:
+                    all_kwargs.pop(key, None)
+
+                OpenTelemetryTracer.set_attribute("inputs", all_kwargs)
+                # to distinguish openai/aoai: inputs -> headers/extra_headers -> ms-azure-ai-promptflow-called-from
+                # TODO: log api_version
+
+                trace = Trace(
+                    name=name,
+                    type=trace_type,
+                    inputs=all_kwargs,
+                    start_time=datetime.utcnow().timestamp(),
+                )
+                Tracer.push(trace)
+                try:
+                    result = f(*args, **kwargs)
+                    OpenTelemetryTracer.set_attribute("output", result)
+                    OpenTelemetryTracer.mark_succeeded()
+                except Exception as ex:
+                    OpenTelemetryTracer.mark_failed()
+                    Tracer.pop(error=ex)
+                    raise
+                else:
+                    result = Tracer.pop(result)
+                return result
 
         return wrapped_method
 
