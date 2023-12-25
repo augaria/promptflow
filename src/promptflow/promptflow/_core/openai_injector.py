@@ -7,13 +7,17 @@ import inspect
 import os
 from datetime import datetime
 from importlib.metadata import version
+from typing import Union
 
 import openai
+from openai import AzureOpenAI as AzureOpenAIClient, OpenAI as OpenAIClient
 
 from promptflow._core.operation_context import OperationContext
 from promptflow.contracts.trace import Trace, TraceType
 
 from .tracer import Tracer
+from .otel_tracer import OpenTelemetryTracer
+
 
 USER_AGENT_HEADER = "x-ms-useragent"
 PROMPTFLOW_PREFIX = "ms-azure-ai-promptflow-"
@@ -29,32 +33,67 @@ def inject_function(args_to_ignore=None, trace_type=TraceType.LLM):
 
         @functools.wraps(f)
         def wrapped_method(*args, **kwargs):
-            if not Tracer.active():
-                return f(*args, **kwargs)
-
-            all_kwargs = {**{k: v for k, v in zip(sig.keys(), args)}, **kwargs}
-            for key in args_to_ignore:
-                all_kwargs.pop(key, None)
             name = f.__qualname__ if not f.__module__ else f.__module__ + "." + f.__qualname__
-            trace = Trace(
-                name=name,
-                type=trace_type,
-                inputs=all_kwargs,
-                start_time=datetime.utcnow().timestamp(),
-            )
-            Tracer.push(trace)
-            try:
-                result = f(*args, **kwargs)
-            except Exception as ex:
-                Tracer.pop(error=ex)
-                raise
-            else:
-                result = Tracer.pop(result)
-            return result
+
+            with OpenTelemetryTracer.start_as_current_span(name):
+                OpenTelemetryTracer.set_attribute("span_type", trace_type.value)
+
+                if not Tracer.active():
+                    return f(*args, **kwargs)
+
+                all_kwargs = {**{k: v for k, v in zip(sig.keys(), args)}, **kwargs}
+                for key in args_to_ignore:
+                    all_kwargs.pop(key, None)
+
+                OpenTelemetryTracer.set_attribute("inputs", all_kwargs)
+                client = get_llm_client_from_calling_args(*args)
+                if client:
+                    client_attributes = get_llm_client_attributes(client)
+                    for k, v in client_attributes.items():
+                        OpenTelemetryTracer.set_attribute(k, v)
+
+                trace = Trace(
+                    name=name,
+                    type=trace_type,
+                    inputs=all_kwargs,
+                    start_time=datetime.utcnow().timestamp(),
+                )
+                Tracer.push(trace)
+                try:
+                    result = f(*args, **kwargs)
+                    OpenTelemetryTracer.set_attribute("output", result)
+                    OpenTelemetryTracer.mark_succeeded()
+                except Exception as ex:
+                    OpenTelemetryTracer.mark_failed()
+                    Tracer.pop(error=ex)
+                    raise
+                else:
+                    result = Tracer.pop(result)
+                return result
 
         return wrapped_method
 
     return wrapper
+
+
+def get_llm_client_from_calling_args(*args) -> Union[AzureOpenAIClient, OpenAIClient]:
+    if IS_LEGACY_OPENAI:
+        return None
+    if args and len(args) > 0 and hasattr(args[0], '_client'):
+        client = getattr(args[0], '_client')
+        if isinstance(client, AzureOpenAIClient) or isinstance(client, OpenAIClient):
+            return client
+    return None
+
+
+def get_llm_client_attributes(client: Union[AzureOpenAIClient, OpenAIClient]) -> dict:
+    res = {}
+    res["api_type"] = client.__class__.__name__
+    
+    if isinstance(client, AzureOpenAIClient):
+        res["api_version"] = client._api_version
+        
+    return res
 
 
 def get_aoai_telemetry_headers() -> dict:

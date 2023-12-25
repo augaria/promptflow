@@ -22,6 +22,7 @@ from promptflow._core.metric_logger import add_metric_logger, remove_metric_logg
 from promptflow._core.openai_injector import inject_openai_api
 from promptflow._core.operation_context import OperationContext
 from promptflow._core.run_tracker import RunTracker
+from promptflow._core.otel_tracer import OpenTelemetryTracer
 from promptflow._core.tool import STREAMING_OPTION_PARAMETER_ATTR, ToolInvoker
 from promptflow._core.tools_manager import ToolsManager
 from promptflow._utils.context_utils import _change_working_dir
@@ -701,7 +702,10 @@ class FlowExecutor:
         self._node_concurrency = node_concurrency
         inputs = apply_default_value_for_input(self._flow.inputs, inputs)
         # For flow run, validate inputs as default
-        with self._run_tracker.node_log_manager:
+        with (
+            self._run_tracker.node_log_manager,
+            OpenTelemetryTracer.start_as_current_span(self._flow.name)
+        ):
             # exec_line interface may be called when executing a batch run, so we only set run_mode as flow run when
             # it is not set.
             operation_context = OperationContext.get_instance()
@@ -714,6 +718,16 @@ class FlowExecutor:
                 validate_inputs=validate_inputs,
                 allow_generator_output=allow_generator_output,
             )
+            if line_result.run_info.status == Status.Completed:
+                OpenTelemetryTracer.mark_succeeded()
+            elif line_result.run_info.status == Status.Failed:
+                OpenTelemetryTracer.mark_failed()
+            OpenTelemetryTracer.set_attribute("framework", "promptflow")
+            OpenTelemetryTracer.set_attribute("span_type", "Flow")
+            OpenTelemetryTracer.set_attribute("inputs", inputs)
+            OpenTelemetryTracer.set_attribute("output", line_result.output)
+            # optional for setting the 'flow_version' considering the schema chanages for inputs/output
+
         #  Return line result with index
         if index is not None and isinstance(line_result.output, dict):
             line_result.output[LINE_NUMBER_KEY] = index
