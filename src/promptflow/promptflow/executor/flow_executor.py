@@ -723,7 +723,7 @@ class FlowExecutor:
             elif line_result.run_info.status == Status.Failed:
                 OpenTelemetryTracer.mark_failed()
             OpenTelemetryTracer.set_attribute("framework", "promptflow")
-            OpenTelemetryTracer.set_attribute("span_type", "Flow")
+            OpenTelemetryTracer.set_attribute("span_type", "promptflow.flow")
             OpenTelemetryTracer.set_attribute("inputs", inputs)
             OpenTelemetryTracer.set_attribute("output", line_result.output)
             # optional for setting the 'flow_version' considering the schema chanages for inputs/output

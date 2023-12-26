@@ -36,7 +36,7 @@ def inject_function(args_to_ignore=None, trace_type=TraceType.LLM):
             name = f.__qualname__ if not f.__module__ else f.__module__ + "." + f.__qualname__
 
             with OpenTelemetryTracer.start_as_current_span(name):
-                OpenTelemetryTracer.set_attribute("span_type", trace_type.value)
+                OpenTelemetryTracer.set_attribute("span_type", trace_type.value.lower())
 
                 if not Tracer.active():
                     return f(*args, **kwargs)
@@ -89,10 +89,11 @@ def get_llm_client_from_calling_args(*args) -> Union[AzureOpenAIClient, OpenAICl
 def get_llm_client_attributes(client: Union[AzureOpenAIClient, OpenAIClient]) -> dict:
     res = {}
     res["api_type"] = client.__class__.__name__
-    
+    res["span_type"] = "llm.openai"
+
     if isinstance(client, AzureOpenAIClient):
         res["api_version"] = client._api_version
-        
+
     return res
 
 

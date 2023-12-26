@@ -10,8 +10,6 @@ from dataclasses import InitVar, asdict, dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Union
 
-from promptflow.contracts.trace import TraceType
-
 
 module_logger = logging.getLogger(__name__)
 STREAMING_OPTION_PARAMETER_ATTR = "_streaming_option_parameter"
@@ -75,17 +73,17 @@ def tool(
         from promptflow._core.otel_tracer import OpenTelemetryTracer
 
         tool_id = f"{func.__module__}.{func.__qualname__}" if func.__module__ else {func.__qualname__}
-        
+
         if inspect.iscoroutinefunction(func):
-    
+
             @functools.wraps(func)
             async def decorated_tool(*args, **kwargs):
-                
+
                 from .tracer import Tracer
-                
+
                 with OpenTelemetryTracer.start_as_current_span(tool_id):
                     OpenTelemetryTracer.set_attribute("framework", "promptflow")
-                    OpenTelemetryTracer.set_attribute("span_type", TraceType.TOOL.value)
+                    OpenTelemetryTracer.set_attribute("span_type", "promptflow.tool")
                     OpenTelemetryTracer.set_attribute("node_name", name)
 
                     if Tracer.active_instance() is None:
@@ -96,7 +94,7 @@ def tool(
                     try:
                         Tracer.push_tool(func, args, kwargs)
                         output = await func(*args, **kwargs)
-                        
+
                         OpenTelemetryTracer.mark_succeeded()
                         OpenTelemetryTracer.set_attribute("inputs", kwargs)
                         OpenTelemetryTracer.set_attribute("output", output)
@@ -114,10 +112,10 @@ def tool(
             @functools.wraps(func)
             def decorated_tool(*args, **kwargs):
                 from .tracer import Tracer
-                
+
                 with OpenTelemetryTracer.start_as_current_span(tool_id):
                     OpenTelemetryTracer.set_attribute("framework", "promptflow")
-                    OpenTelemetryTracer.set_attribute("span_type", TraceType.TOOL.value)
+                    OpenTelemetryTracer.set_attribute("span_type", "promptflow.tool")
                     OpenTelemetryTracer.set_attribute("node_name", name)
                     # TODO: log package_version for package tool
 
@@ -129,7 +127,7 @@ def tool(
                     try:
                         Tracer.push_tool(func, args, kwargs)
                         output = func(*args, **kwargs)
-                        
+
                         OpenTelemetryTracer.mark_succeeded()
                         OpenTelemetryTracer.set_attribute("inputs", kwargs)
                         OpenTelemetryTracer.set_attribute("output", output)
