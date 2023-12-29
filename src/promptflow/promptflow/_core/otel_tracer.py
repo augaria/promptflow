@@ -12,8 +12,6 @@ from opentelemetry.sdk.trace.export import (
     SpanExportResult
 )
 
-from promptflow._utils.dataclass_serializer import serialize
-
 
 # Only for demo purpose, dumping spans to a jsonl file.
 # Console/HTTP/AppInsights exporters are already available.
@@ -106,10 +104,62 @@ class OpenTelemetryTracer:
             return [self._generate_attribute_value(item) for item in obj]
 
         try:
-            obj = serialize(obj)
-            return json.dumps(obj)
-        except Exception:
+            serializable_obj = OpenTelemetryTracer.get_serializable_obj(
+                obj,
+                default=OpenTelemetryTracer.unserializable_handler
+            )
+            return json.dumps(serializable_obj, default=OpenTelemetryTracer.unserializable_handler)
+        except BaseException:
             return str(obj)
+
+    @staticmethod
+    def unserializable_handler(obj):
+        if hasattr(obj, '__dict__'):
+            return obj.__dict__
+
+    @staticmethod
+    def get_serializable_obj(
+        obj,
+        default: callable = None,
+        paths: set = set()
+    ):
+        try:
+            json.dumps(
+                obj,
+                default=default
+            )
+            return obj
+        except Exception:
+            paths.add(id(obj))
+
+            if isinstance(obj, (list, tuple)):
+                res = []
+                for item in obj:
+                    if id(item) in paths:
+                        continue
+                    sub_paths = paths.copy()
+                    res.append(OpenTelemetryTracer.get_serializable_obj(
+                        item,
+                        default=default,
+                        paths=sub_paths
+                    ))
+                return res
+
+            if isinstance(obj, dict):
+                attrs = obj
+            else:
+                attrs = obj.__dict__
+            res = {}
+            for key, value in attrs.items():
+                if id(value) in paths or key == "self":
+                    continue
+                sub_paths = paths.copy()
+                res[key] = OpenTelemetryTracer.get_serializable_obj(
+                    value,
+                    default=default,
+                    paths=sub_paths
+                )
+            return res
 
     def __del__(self):
         self.close()
