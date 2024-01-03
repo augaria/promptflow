@@ -10,6 +10,7 @@ from dataclasses import InitVar, asdict, dataclass, field
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Union
 
+
 module_logger = logging.getLogger(__name__)
 STREAMING_OPTION_PARAMETER_ATTR = "_streaming_option_parameter"
 
@@ -69,25 +70,41 @@ def tool(
 
     def tool_decorator(func: Callable) -> Callable:
         from promptflow.exceptions import UserErrorException
+        from promptflow._core.otel_tracer import OpenTelemetryTracer
+
+        tool_id = f"{func.__module__}.{func.__qualname__}" if func.__module__ else {func.__qualname__}
 
         if inspect.iscoroutinefunction(func):
 
             @functools.wraps(func)
             async def decorated_tool(*args, **kwargs):
+
                 from .tracer import Tracer
 
-                if Tracer.active_instance() is None:
-                    return await func(*args, **kwargs)  # Do nothing if no tracing is enabled.
-                # Should not extract these codes to a separate function here.
-                # We directly call func instead of calling Tracer.invoke,
-                # because we want to avoid long stack trace when hitting an exception.
-                try:
-                    Tracer.push_tool(func, args, kwargs)
-                    output = await func(*args, **kwargs)
-                    return Tracer.pop(output)
-                except Exception as e:
-                    Tracer.pop(None, e)
-                    raise
+                with OpenTelemetryTracer.start_as_current_span(tool_id):
+                    OpenTelemetryTracer.set_attribute("framework", "promptflow")
+                    OpenTelemetryTracer.set_attribute("span_type", "promptflow.tool")
+                    OpenTelemetryTracer.set_attribute("node_name", name)
+
+                    if Tracer.active_instance() is None:
+                        return await func(*args, **kwargs)  # Do nothing if no tracing is enabled.
+                    # Should not extract these codes to a separate function here.
+                    # We directly call func instead of calling Tracer.invoke,
+                    # because we want to avoid long stack trace when hitting an exception.
+                    try:
+                        Tracer.push_tool(func, args, kwargs)
+                        output = await func(*args, **kwargs)
+
+                        OpenTelemetryTracer.mark_succeeded()
+                        OpenTelemetryTracer.set_attribute("inputs", kwargs)
+                        OpenTelemetryTracer.set_attribute("output", output)
+                        # optional for setting the 'tool_version' considering the schema chanages for inputs/output
+
+                        return Tracer.pop(output)
+                    except Exception as e:
+                        OpenTelemetryTracer.mark_failed()
+                        Tracer.pop(None, e)
+                        raise
 
             new_f = decorated_tool
         else:
@@ -96,18 +113,30 @@ def tool(
             def decorated_tool(*args, **kwargs):
                 from .tracer import Tracer
 
-                if Tracer.active_instance() is None:
-                    return func(*args, **kwargs)  # Do nothing if no tracing is enabled.
-                # Should not extract these codes to a separate function here.
-                # We directly call func instead of calling Tracer.invoke,
-                # because we want to avoid long stack trace when hitting an exception.
-                try:
-                    Tracer.push_tool(func, args, kwargs)
-                    output = func(*args, **kwargs)
-                    return Tracer.pop(output)
-                except Exception as e:
-                    Tracer.pop(None, e)
-                    raise
+                with OpenTelemetryTracer.start_as_current_span(tool_id):
+                    OpenTelemetryTracer.set_attribute("framework", "promptflow")
+                    OpenTelemetryTracer.set_attribute("span_type", "promptflow.tool")
+                    OpenTelemetryTracer.set_attribute("node_name", name)
+                    # TODO: log package_version for package tool
+
+                    if Tracer.active_instance() is None:
+                        return func(*args, **kwargs)  # Do nothing if no tracing is enabled.
+                    # Should not extract these codes to a separate function here.
+                    # We directly call func instead of calling Tracer.invoke,
+                    # because we want to avoid long stack trace when hitting an exception.
+                    try:
+                        Tracer.push_tool(func, args, kwargs)
+                        output = func(*args, **kwargs)
+
+                        OpenTelemetryTracer.mark_succeeded()
+                        OpenTelemetryTracer.set_attribute("inputs", kwargs)
+                        OpenTelemetryTracer.set_attribute("output", output)
+
+                        return Tracer.pop(output)
+                    except Exception as e:
+                        OpenTelemetryTracer.mark_failed()
+                        Tracer.pop(None, e)
+                        raise
 
             new_f = decorated_tool
 
